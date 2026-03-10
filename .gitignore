@@ -1,0 +1,10 @@
+venv/
+__pycache__/
+*.pyc
+translation_entries.csv
+.env
+*.swp
+*.bak
+.idea/
+.DS_Store
+.config.json
