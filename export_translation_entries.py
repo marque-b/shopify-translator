@@ -16,7 +16,7 @@ Uses SHOPIFY_SHOP, SHOPIFY_CLIENT_ID, SHOPIFY_CLIENT_SECRET (or NEW_* equivalent
 Usage:
     python export_translation_entries.py
     python export_translation_entries.py --output translation_entries.csv
-    python export_translation_entries.py --theme-id THEME_ID   # only that theme; omit for store default
+    python export_translation_entries.py --theme-id THEME_ID   # use this theme for theme content; all other types still exported
     python export_translation_entries.py --incomplete-only     # only rows with at least one missing locale
     python export_translation_entries.py --condense            # merge repeated source values (dictionary-style CSV)
 """
@@ -411,7 +411,7 @@ class ShopifyTranslationExporter:
     ) -> Tuple[List[Dict[str, str]], Optional[str]]:
         """
         Fetch translatable resources for the given resource_types with translations for configured locales.
-        theme_id: if set, only that theme's entries are returned (no products/collections/etc.).
+        theme_id: if set, theme content is fetched for that theme only; all other types (products, collections, etc.) are still fetched.
         """
         all_rows: List[Dict[str, str]] = []
 
@@ -433,8 +433,7 @@ class ShopifyTranslationExporter:
                     count += len(rows)
                 if nodes:
                     print(f"  ✓ Theme (id={theme_id}): {len(nodes)} resources, {count} rows")
-            # When theme_id is set, return only this theme's entries (no products, collections, etc.)
-            return all_rows, None
+            # When theme_id is set, theme rows are done; continue to fetch all other resource types below.
 
         for rtype in resource_types:
             if theme_id and rtype in self.THEME_RESOURCE_TYPES:
@@ -884,7 +883,7 @@ def main():
     exporter = ShopifyTranslationExporter(shop_domain, access_token, locales)
 
     if args.theme_id:
-        print(f"Theme: using id {args.theme_id} — exporting only this theme's entries.")
+        print(f"Theme: using id {args.theme_id} for theme content; exporting all resource types.")
     else:
         print("Theme: using store default (live theme) for theme entries.")
     print(f"Fetching translatable resources and translations for {locales}...")
