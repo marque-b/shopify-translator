@@ -18,10 +18,11 @@ What you can do (one mode per run):
      Requires OPENROUTER_API_KEY in .env. Output default: {input_stem}_translated.csv.
      Example: python process_translations.py --translate -i entries.csv
      Use --dry-run to see what would be translated; use --test [N] to limit to first N digests.
+     Can be combined with --check-handles: translate first, then run handle-check on the translated file.
 
   3. Check handles (--check-handles)
-     Normalize all locale columns in every row (remove accents, replace spaces with hyphens).
-     For rows with field_key=handle: keep only those where all locale columns are present and valid URL slugs.
+     For rows with field_key=handle only: normalize locale columns (accents, spaces→hyphens) and keep only those
+     with all locales present and valid URL slugs. All other rows are left unchanged.
      Output: {stem}_check_handles.csv (valid handle rows + all non-handle rows) and {stem}_check_handles_removed.csv.
      Example: python process_translations.py --check-handles -i entries.csv
 
@@ -412,8 +413,9 @@ def check_handles_csv(
     field_key_column: str = "field_key",
 ) -> tuple[Path, Path, int, int]:
     """
-    Normalize all locale columns in every row (remove accents, spaces → hyphens), then for handle rows
-    keep only those with all locale columns present and valid URL slugs.
+    For rows where field_key = "handle" only: normalize locale columns (remove accents, spaces → hyphens)
+    and keep only those with all locale columns present and valid URL slugs. All other rows are left
+    unchanged and always kept.
 
     Writes to {stem}_check_handles.csv (valid handle rows + all non-handle rows) and
     {stem}_check_handles_removed.csv (handle rows that failed the check).
@@ -421,18 +423,17 @@ def check_handles_csv(
     """
     out_kept, out_removed = _output_paths_from_input(input_path, "_check_handles", "_check_handles_removed")
     rows, fieldnames = load_entries(input_path)
-    # 1. Normalize all locale columns in all rows (accents + spaces → hyphens)
-    for row in rows:
-        for loc in locale_columns:
-            if loc in row and row.get(loc):
-                row[loc] = normalize_handle_value(row[loc])
-    # 2. For handle rows only: keep if all locales present and valid slug; else to removed
     kept: list[dict[str, str]] = []
     removed: list[dict[str, str]] = []
     for row in rows:
-        if (row.get(field_key_column) or "").strip() != FIELD_KEY_HANDLE:
+        is_handle_row = (row.get(field_key_column) or "").strip() == FIELD_KEY_HANDLE
+        if not is_handle_row:
             kept.append(row)
             continue
+        # Handle row only: normalize locale columns (accents + spaces → hyphens), then validate
+        for loc in locale_columns:
+            if loc in row and row.get(loc):
+                row[loc] = normalize_handle_value(row[loc])
         all_present = True
         all_valid = True
         for loc in locale_columns:
@@ -621,21 +622,15 @@ def run_translate(
             print(f"  ... and {n_total - 5} more.", file=sys.stderr)
         return 0
 
-    print(f"Translating {n_total} unique digest(s): {n_from_dict} from dictionary, {n_need_api} via OpenRouter ({model})...", file=sys.stderr)
     print("(Only successfully translated rows are written to the output file.)", file=sys.stderr)
     if "o1" in model or "gpt-oss" in model:
         print("(First request may take 30–60s with reasoning enabled.)", file=sys.stderr)
 
-    def _format_duration(seconds: float) -> str:
-        if seconds < 60:
-            return f"{int(seconds)}s"
-        m, s = divmod(int(seconds), 60)
-        return f"{m}m {s}s"
-
+    BAR_WIDTH = 24
     failed_digests: list[tuple[str, str]] = []
     rows_to_write: list[dict[str, str]] = []
-    start_time = time.monotonic()
     api_calls_done = 0
+    dict_used = 0
     n_appended_to_dict = 0
     for i, (digest, group) in enumerate(digest_to_rows.items(), 1):
         src_val = (group[0].get(source_column) or "").strip()
@@ -645,6 +640,7 @@ def run_translate(
         try:
             if use_dictionary:
                 result = {loc: dictionary[digest].get(loc, "") for loc in target_columns}
+                dict_used += 1
             else:
                 result = translate_source_to_targets(
                     src_val, api_key, system_prompt, target_columns, response_schema, model=model
@@ -666,10 +662,10 @@ def run_translate(
                     if loc in row and result.get(loc):
                         row[loc] = result[loc]
                 rows_to_write.append(row)
-            elapsed = time.monotonic() - start_time
-            eta_sec = (elapsed / api_calls_done) * (n_need_api - api_calls_done) if api_calls_done and api_calls_done < n_need_api else 0
-            eta_str = f", ~{_format_duration(eta_sec)} left" if eta_sec > 0 else ""
-            line = f"  {i}/{n_total} done ({api_calls_done} API){eta_str}    "
+            pct = int(100 * i / n_total) if n_total else 0
+            filled = int(BAR_WIDTH * i / n_total) if n_total else 0
+            bar = "\u2588" * filled + "\u2591" * (BAR_WIDTH - filled)
+            line = f"  [{bar}] {pct:3}%  {i}/{n_total}  \u00b7  {dict_used} dict, {api_calls_done} API  "
             print(f"\r{line}", end="", file=sys.stderr)
             sys.stderr.flush()
             if not use_dictionary and i < n_total:
@@ -763,7 +759,7 @@ def main() -> int:
     parser.add_argument(
         "--check-handles",
         action="store_true",
-        help="Normalize all locale columns (accents, spaces→hyphens), then for handle rows keep only those with all locales present and valid slugs. Writes {stem}_check_handles.csv and {stem}_check_handles_removed.csv.",
+        help="For field_key=handle rows only: normalize locale columns and keep valid slug rows. Other rows unchanged. With --translate: runs on translated file. Writes {stem}_check_handles.csv and {stem}_check_handles_removed.csv.",
     )
     parser.add_argument(
         "--sanitize",
@@ -801,16 +797,6 @@ def main() -> int:
             return 1
         return 0
 
-    if args.check_handles:
-        if not args.input.exists():
-            print(f"Error: input file not found: {args.input}", file=sys.stderr)
-            return 1
-        out_kept, out_removed, n_keep, n_removed = check_handles_csv(args.input, locale_cols)
-        print(
-            f"Check handles: {n_keep} rows → {out_kept}, {n_removed} handle rows removed → {out_removed}"
-        )
-        return 0
-
     if args.translate:
         api_key = (os.environ.get("OPENROUTER_API_KEY") or "").strip()
         if not api_key and not args.dry_run:
@@ -819,7 +805,7 @@ def main() -> int:
         if not args.input.exists():
             print(f"Error: input file not found: {args.input}", file=sys.stderr)
             return 1
-        return run_translate(
+        rc = run_translate(
             args.input,
             args.output,
             args.system_prompt,
@@ -832,6 +818,25 @@ def main() -> int:
             test_limit=args.test,
             dictionary_path=args.dictionary,
         )
+        if rc != 0:
+            return rc
+        # If both --translate and --check-handles: run handle-check on the translated output
+        if args.check_handles and args.output.exists():
+            out_kept, out_removed, n_keep, n_removed = check_handles_csv(args.output, locale_cols)
+            print(
+                f"Check handles (on translated file): {n_keep} rows → {out_kept}, {n_removed} handle rows removed → {out_removed}"
+            )
+        return 0
+
+    if args.check_handles:
+        if not args.input.exists():
+            print(f"Error: input file not found: {args.input}", file=sys.stderr)
+            return 1
+        out_kept, out_removed, n_keep, n_removed = check_handles_csv(args.input, locale_cols)
+        print(
+            f"Check handles: {n_keep} rows → {out_kept}, {n_removed} handle rows removed → {out_removed}"
+        )
+        return 0
 
     if not args.input.exists():
         print(f"Error: input file not found: {args.input}", file=sys.stderr)
