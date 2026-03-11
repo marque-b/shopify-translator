@@ -2,9 +2,11 @@ venv/
 __pycache__/
 *.pyc
 translation_entries.csv
+translation_entries_translated.csv
 .env
 *.swp
 *.bak
 .idea/
 .DS_Store
 .config.json
+.translation_system_prompt.md
